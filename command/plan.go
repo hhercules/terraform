@@ -37,72 +37,75 @@ func (c *PlanCommand) Run(args []string) int {
 		return 1
 	}
 
-	var path string
-	args = cmdFlags.Args()
-	if len(args) > 1 {
-		c.Ui.Error(
-			"The plan command expects at most one argument with the path\n" +
-				"to a Terraform configuration.\n")
-		cmdFlags.Usage()
+	configPath, err := ModulePath(cmdFlags.Args())
+	if err != nil {
+		c.Ui.Error(err.Error())
 		return 1
-	} else if len(args) == 1 {
-		path = args[0]
-	} else {
-		var err error
-		path, err = os.Getwd()
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf("Error getting pwd: %s", err))
-		}
 	}
 
+	// Load the module
+	mod, err := c.Module(configPath)
+	if err != nil {
+		c.Ui.Error(fmt.Sprintf("Failed to load root config module: %s", err))
+		return 1
+	}
+
+	// Add the extra hook that we use to count the number of changes
+	// during the plan operation.
 	countHook := new(CountHook)
 	c.Meta.extraHooks = []terraform.Hook{countHook}
 
-	// This is going to keep track of shadow errors
-	var shadowErr error
-
-	ctx, planned, err := c.Context(contextOpts{
-		Destroy:     destroy,
-		Path:        path,
-		StatePath:   c.Meta.statePath,
-		Parallelism: c.Meta.parallelism,
-	})
+	// Load the backend
+	b, err := c.Backend(nil)
 	if err != nil {
+		c.Ui.Error(fmt.Sprintf("Failed to load backend: %s", err))
+		return 1
+	}
+
+	// Build the operation
+	opReq := c.Operation()
+	opReq.Destroy = destroy
+	opReq.Module = mod
+	opReq.Sequence = []backend.OperationType{
+		backend.OperationTypeRefresh,
+		backend.OperationTypePlan,
+	}
+
+	// Perform the operation
+	op, err := b.Operation(context.Background(), opReq)
+	if err != nil {
+		c.Ui.Error(fmt.Sprintf("Error starting operation: %s", err))
+		return 1
+	}
+
+	// Wait for the operation to complete
+	<-op.Done()
+	if err := op.Err; err != nil {
 		c.Ui.Error(err.Error())
 		return 1
 	}
-	if planned {
-		c.Ui.Output(c.Colorize().Color(
-			"[reset][bold][yellow]" +
-				"The plan command received a saved plan file as input. This command\n" +
-				"will output the saved plan. This will not modify the already-existing\n" +
-				"plan. If you wish to generate a new plan, please pass in a configuration\n" +
-				"directory as an argument.\n\n"))
 
-		// Disable refreshing no matter what since we only want to show the plan
-		refresh = false
-	}
+	/*
+		if planned {
+			c.Ui.Output(c.Colorize().Color(
+				"[reset][bold][yellow]" +
+					"The plan command received a saved plan file as input. This command\n" +
+					"will output the saved plan. This will not modify the already-existing\n" +
+					"plan. If you wish to generate a new plan, please pass in a configuration\n" +
+					"directory as an argument.\n\n"))
 
-	err = terraform.SetDebugInfo(DefaultDataDir)
-	if err != nil {
-		c.Ui.Error(err.Error())
-		return 1
-	}
+			// Disable refreshing no matter what since we only want to show the plan
+			refresh = false
+		}
+	*/
 
-	if err := ctx.Input(c.InputMode()); err != nil {
-		c.Ui.Error(fmt.Sprintf("Error configuring: %s", err))
-		return 1
-	}
-
-	// Record any shadow errors for later
-	if err := ctx.ShadowError(); err != nil {
-		shadowErr = multierror.Append(shadowErr, multierror.Prefix(
-			err, "input operation:"))
-	}
-
-	if !validateContext(ctx, c.Ui) {
-		return 1
-	}
+	/*
+		err = terraform.SetDebugInfo(DefaultDataDir)
+		if err != nil {
+			c.Ui.Error(err.Error())
+			return 1
+		}
+	*/
 
 	if refresh {
 		c.Ui.Output("Refreshing Terraform state in-memory prior to plan...")
@@ -164,15 +167,6 @@ func (c *PlanCommand) Run(args []string) int {
 		countHook.ToAdd+countHook.ToRemoveAndAdd,
 		countHook.ToChange,
 		countHook.ToRemove+countHook.ToRemoveAndAdd)))
-
-	// Record any shadow errors for later
-	if err := ctx.ShadowError(); err != nil {
-		shadowErr = multierror.Append(shadowErr, multierror.Prefix(
-			err, "plan operation:"))
-	}
-
-	// If we have an error in the shadow graph, let the user know.
-	c.outputShadowError(shadowErr, true)
 
 	if detailed {
 		return 2

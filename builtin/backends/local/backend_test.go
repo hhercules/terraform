@@ -124,9 +124,7 @@ test_instance.foo:
 
 func testOperationRefresh() *backend.Operation {
 	return &backend.Operation{
-		Sequence: []backend.OperationType{
-			backend.OperationTypeRefresh,
-		},
+		Type: backend.OperationTypeRefresh,
 	}
 }
 
